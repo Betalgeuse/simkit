@@ -1,0 +1,50 @@
+name: sims
+# Synthetic worlds only. Logs and artifacts of a public repo are world-readable: never pass SIMKIT_PARAMS here.
+on:
+  workflow_dispatch:
+    inputs:
+      worlds: {description: "comma list", default: "zero_edge,base,prior4x,fat_tail,rare_slow,decay,crisis"}
+      seeds: {description: "comma list", default: "1,2,3"}
+      paths: {description: "paths per cell", default: "2000"}
+      arms: {description: "comma list", default: "CUR,NEW025,NEW11"}
+permissions:
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          w = "${{ inputs.worlds }}".split(","); s = "${{ inputs.seeds }}".split(",")
+          cells = [{"world": a, "seed": b} for a in w for b in s]
+          assert len(cells) <= 256, f"{len(cells)} cells > 256 matrix limit: split the dispatch"
+          print("matrix=" + json.dumps({"include": cells}))
+          PY
+  cell:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -r requirements.txt
+      - working-directory: simkit
+        env: {OMP_NUM_THREADS: "1", OPENBLAS_NUM_THREADS: "1"}
+        # one process per arm: a cell is single-threaded, the runner has 4 vCPU
+        run: |
+          echo "${{ inputs.arms }}" | tr , '\n' | xargs -P 4 -I{} \
+            python run_cell.py ${{ matrix.world }} ${{ matrix.seed }} ${{ inputs.paths }} {} ../out/{}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cell-${{ matrix.world }}-${{ matrix.seed }}
+          path: out/
+          retention-days: 14
